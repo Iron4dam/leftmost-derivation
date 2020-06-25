@@ -2,9 +2,6 @@ import argparse
 import gym
 import gym_hanoi
 import numpy as np
-from itertools import count
-from collections import namedtuple
-from random import shuffle
 import time
 
 import torch
@@ -12,51 +9,59 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
-
 from torch.utils.tensorboard import SummaryWriter
 
-from PCFG import PCFG
-from tqdm import tqdm
-
-max_steps = 300
-entropy_factor = 0.05
-nt = 6
-use_lstm = False
-state_onehot = True
-
-# Cart Pole
-num_disks = 3
-env_noise = 0.
-pretrain = False
+max_steps = 300    # max steps the agent can execute per episode
+max_episodes = 1000  # max number of episodes
+entropy_factor = 0.05   # coefficient multiplying the entropy loss
+nt = 6    # number of non-terminals
+use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
 lr = 1e-3
+gamma = 0.99   # discount factor
+log_interval = 10   # episode interval between training logs
+allow_state_unchange = False   # if True, we do not pass in the same state into LSTM/encoder if state unchanged
+retain_graph = True if allow_state_unchange else False
 
-if pretrain:
-    print('using pretrained weights')
-else:
-    print('training from scratch')
 
-parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
-parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
-                    help='discount factor (default: 0.99)')
-parser.add_argument('--seed', type=int, default=543, metavar='N',
-                    help='random seed (default: 543)')
-parser.add_argument('--render', action='store_true',
-                    help='render the environment')
-parser.add_argument('--log-interval', type=int, default=10, metavar='N',
-                    help='interval between training status logs (default: 10)')
-args = parser.parse_args()
-
+# gym-hanoi env settings
+num_disks = 3
+env_noise = 0.   # transition/action failure probability
+state_space_dim = num_disks
+action_space_dim = 6   # always 6 actions for 3 poles
 env = gym.make("Hanoi-v0")
 env.set_env_parameters(num_disks, env_noise, verbose=True)
-
 # env.seed(args.seed)
 # torch.manual_seed(args.seed)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cpu")
 
-state_space_dim = num_disks
-action_space_dim = 6
 
+parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
+parser.add_argument('--gamma', type=float, default=gamma, metavar='G',
+                    help='discount factor (default: 0.99)')
+parser.add_argument('--seed', type=int, default=543, metavar='N',
+                    help='random seed (default: 543)')
+parser.add_argument('--log-interval', type=int, default=log_interval, metavar='N',
+                    help='interval between training status logs (default: 10)')
+parser.add_argument('--lr', type=int, default=lr, metavar='N',
+                    help='learning rate (default: 1e-3)')
+parser.add_argument('--max-steps', type=int, default=max_steps, metavar='N',
+                    help='max steps the agent can execute per episode (default: 300)')
+parser.add_argument('--max-episodes', type=int, default=max_episodes, metavar='N',
+                    help='max number of episodes (default: 1000)')
+parser.add_argument('--entropy-factor', type=float, default=entropy_factor, metavar='N',
+                    help='coefficient multiplying the entropy loss (default: 0.05)')
+parser.add_argument('--action-space-dim', type=int, default=action_space_dim, metavar='N',
+                    help='action space dimension (default: 6)')
+parser.add_argument('--state-space-dim', type=int, default=state_space_dim, metavar='N',
+                    help='state space dimension (default: 3)')
+parser.add_argument('--allow-state-unchange', type=bool, default=allow_state_unchange, metavar='N',
+                    help='if True, we do not pass in the same state into LSTM/encoder if state unchanged (default: False)')
+parser.add_argument('--retain-graph', type=bool, default=retain_graph, metavar='N',
+                    help='same as allow-state-unchange (default: False)')
+parser.add_argument('--use-lstm', type=bool, default=use_lstm, metavar='N',
+                    help='use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep (default: True)')
+args = parser.parse_args()
 
 
 class ResidualLayer(nn.Module):
@@ -69,55 +74,44 @@ class ResidualLayer(nn.Module):
     def forward(self, x):
         return F.relu(self.lin2(F.relu(self.lin1(x)))) + x
 
-
 class Policy(nn.Module):
     """
     implements both actor and critic in one model
     """
 
-    def __init__(self, vocab=action_space_dim,  # vocab = action_space
-                 state_space=state_space_dim,
-                 state_onehot = state_onehot,
+    def __init__(self, action_space=args.action_space_dim,
+                 state_space=args.state_space_dim*3,   # use one hot encoding for states
                  nt_states=nt,
-                 h_dim=32,
-                 rule_dim=32,
-                 z_dim=32,
-                 state_dim=32,
-                 use_lstm = use_lstm):
+                 lstm_dim=32,   # dimension of lstm hidden states
+                 rule_dim=32,  # dimension of rule embeddings
+                 z_dim=32,   # dimension of the latent state encoding vector (either given by LSTM or a simple NN encoder)
+                 use_lstm = args.use_lstm,
+                 allow_state_unchange = args.allow_state_unchange):
         super(Policy, self).__init__()
-        self.state_dim = state_dim
-        self.rule_dim = rule_dim
 
-        self.use_lstm = use_lstm
-
-        self.state_onehot = state_onehot
-        if state_onehot:
-            self.state_space = state_space * 3
-        else:
-            self.state_space = state_space
-        self.affine1 = nn.Linear(self.state_space, state_dim)
-
-        if use_lstm:
-            self.z_dim = z_dim
-        else:
-            self.z_dim = self.state_dim
-
-        self.vocab = vocab
+        # dimensions
+        self.action_space = action_space
+        self.state_space = state_space
         self.nt_states = nt_states
+        self.rule_dim = rule_dim
+        self.z_dim = z_dim
+        self.use_lstm = use_lstm
+        self.allow_state_unchange = allow_state_unchange
 
-        # action & reward buffer
+        # action probs, micro/macro action, reward, hidden state buffer
         self.action_probs = []
-        self.rewards = []
-        self.hidden_state = None
         self.action_probs_hist = []
-
         self.leftmost = [0]   # leftmost unexanded non-terminal
         self.micro_execute = []  # micro action(s) to execute at this time step
         self.micro_storage = []  # rightmost terminal left unexecuted
+        self.rewards = []
+        self.hidden_state = None
+        self.state_changed = True   # stores whether state changed in the last timestep
 
+        # embeddings
         self.root_rule_num = nt_states * nt_states
-        self.nt_rule_num = nt_states * (nt_states + vocab) * (nt_states + vocab)
-        self.nt_nt_rule_num = (nt_states + vocab) * (nt_states + vocab)
+        self.nt_rule_num = nt_states * (nt_states + action_space) * (nt_states + action_space)
+        self.nt_nt_rule_num = (nt_states + action_space) * (nt_states + action_space)
 
         self.root_rule_emb = nn.Parameter(torch.randn(self.root_rule_num, rule_dim))
         self.nt_rule_emb = nn.Parameter(torch.randn(self.nt_rule_num, rule_dim))
@@ -125,57 +119,63 @@ class Policy(nn.Module):
         self.register_parameter('root_rule_emb', self.root_rule_emb)
         self.register_parameter('nt_rule_emb', self.nt_rule_emb)
 
-        self.root_rule_mlp = nn.Sequential(nn.Linear(state_dim + self.z_dim, rule_dim),
-                                      ResidualLayer(state_dim, rule_dim),
-                                      ResidualLayer(state_dim, rule_dim),
-                                      nn.Linear(state_dim, 1))    #self.root_rule_num))
-        self.nt_rule_mlp = nn.Sequential(nn.Linear(state_dim + self.z_dim, rule_dim),
-                                      ResidualLayer(state_dim, rule_dim),
-                                      ResidualLayer(state_dim, rule_dim),
-                                      nn.Linear(state_dim, 1))    #self.nt_rule_num))
-
-        self.enc_rnn = nn.LSTM(state_dim, h_dim, bidirectional=False, num_layers=1, batch_first=True)
-        self.enc_params = nn.Linear(h_dim, z_dim * 2)
-
-        self.state_changed = True
-
-    def enc(self, state_emb):
-        h, hidden_state = self.enc_rnn(state_emb.unsqueeze(0), self.hidden_state)
-        self.hidden_state = hidden_state
-        params = self.enc_params(h.max(1)[0])
-        mean = params[:, :self.z_dim]
-        logvar = params[:, self.z_dim:]
-        return mean, logvar
+        # encoders, NNs
+        if use_lstm:
+            # encoding state through a LSTM
+            self.enc_lstm = nn.LSTM(self.state_space, lstm_dim, bidirectional=False, num_layers=1, batch_first=True)
+            self.lstm_z = nn.Linear(lstm_dim, z_dim * 2)
+        else:
+            # encoding state directly to latent state vector z
+            self.state_emb_z = nn.Linear(self.state_space, self.z_dim)
+        # output a single rule score for each rule (root rule: S->NT*NT, nt rule: NT->(NT*T)*(NT*T)
+        self.root_rule_mlp = nn.Sequential(nn.Linear(rule_dim + self.z_dim, rule_dim),
+                                      ResidualLayer(rule_dim, rule_dim),
+                                      ResidualLayer(rule_dim, rule_dim),
+                                      nn.Linear(rule_dim, 1))
+        self.nt_rule_mlp = nn.Sequential(nn.Linear(rule_dim + self.z_dim, rule_dim),
+                                      ResidualLayer(rule_dim, rule_dim),
+                                      ResidualLayer(rule_dim, rule_dim),
+                                      nn.Linear(rule_dim, 1))
 
     def forward(self, state, use_mean=True):
-
         assert len(self.micro_execute) == 0   # no unexecuted micro-actions
 
-        if self.state_onehot:
-            state_one_hot = torch.FloatTensor(int(self.state_space/3), 3).zero_().to(device)
-            state = state_one_hot.scatter_(1, state, 1).view(1, -1).squeeze(0)  # 1 x (3 x state_space)
-            state_emb = F.relu(self.affine1(state.unsqueeze(0)))
+        # change state to one hot vector
+        state_one_hot = torch.FloatTensor(int(self.state_space/3), 3).zero_().to(device)
+        state_emb = state_one_hot.scatter_(1, state, 1).view(1, -1).squeeze(0)  # 1 x (3 x state_space)
 
         if self.use_lstm:
-            if self.state_changed:
-                mean, logvar = self.enc(state_emb)
-
-                batch_size = 1
+            if self.state_changed or (not self.allow_state_unchange):
+                # state has changed, or we do not allow to use the last state in the previous step, pass new state into LSTM
+                h, hidden_state = self.enc_lstm(state_emb.unsqueeze(0), self.hidden_state)
+                self.hidden_state = hidden_state   # hidden state buffer
+                params = self.enc_params(h.max(1)[0])
+                mean = params[:, :self.z_dim]
+                logvar = params[:, self.z_dim:]
 
                 if use_mean:
                     z = mean
                 else:
-                    z = mean.new(batch_size, mean.size(1)).normal_(0, 1)
+                    z = mean.new(1, self.z_dim).normal_(0, 1)   # mean.size(1)
                     z = (0.5 * logvar).exp() * z + mean
                 self.z = z
-            else:
+            elif (not self.state_changed) and allow_state_unchange:
+                # state hasn't changed, and we allow to use the last state in previous step, use the same latent state vector z as before
                 z = self.z
         else:
-            self.z = state_emb
-            z = self.z
+            # use NN to encode z
+            if self.state_changed or (not self.allow_state_unchange):
+                # state has changed, or we do not allow to use the last state in the previous step, pass new state into LSTM
+                self.z = F.relu(self.state_emb_z(state_emb.unsqueeze(0)))
+                z = self.z
+            elif (not self.state_changed) and allow_state_unchange:
+                # state hasn't changed, and we allow to use the last state in previous step, use the same latent state vector z as before
+                z = self.z
 
+
+        # pop the leftmost non-terminal
         nt = self.leftmost.pop(-1)
-        assert nt == 0 or nt >= self.vocab
+        assert nt == 0 or nt >= self.action_space
 
         if nt == 0:
             # calculate rule probs
@@ -190,20 +190,19 @@ class Policy(nn.Module):
             rule = m.sample()
             log_prob = m.log_prob(rule)
 
-            nt1 = int(rule//self.nt_states + self.vocab)
-            nt2 = int(rule % self.nt_states + self.vocab)
+            nt1 = int(rule//self.nt_states + self.action_space)
+            nt2 = int(rule % self.nt_states + self.action_space)
 
             self.leftmost = [nt1,nt2]
             self.rightmost = []
             self.mirco = []
 
         else:
-            nt = nt - self.vocab
+            nt = nt - self.action_space
             z = z.expand(self.nt_nt_rule_num, self.z_dim)
             nt_rule_emb = self.nt_rule_emb   # nt_rule_num x rule_dim
-            nt_rule_emb = nt_rule_emb.expand(self.nt_rule_num, self.rule_dim).view(self.nt_states,
-                                                                              (self.vocab + self.nt_states)*(self.vocab + self.nt_states),
-                                                                                           self.rule_dim)
+            nt_rule_emb = nt_rule_emb.expand(self.nt_rule_num, self.rule_dim).view(
+                self.nt_states,(self.action_space + self.nt_states)*(self.action_space + self.nt_states),self.rule_dim)
             nt_rule_emb = nt_rule_emb[nt,:,:]  #  nt_nt_rules_num x rule_dim
             nt_rule_emb = torch.cat([nt_rule_emb, z], 1)
             nt_rule_score = self.nt_rule_mlp(nt_rule_emb).squeeze()
@@ -214,12 +213,12 @@ class Policy(nn.Module):
             rule = m.sample()
             log_prob = m.log_prob(rule)
 
-            nt1 = int(rule//(self.vocab+self.nt_states))
-            nt2 = int(rule%(self.vocab+self.nt_states))
+            nt1 = int(rule//(self.action_space+self.nt_states))
+            nt2 = int(rule%(self.action_space+self.nt_states))
 
-            if nt2 < self.vocab:
+            if nt2 < self.action_space:
                 # nt2 is a micro-action
-                if nt1 < self.vocab:
+                if nt1 < self.action_space:
                     # nt1 is a micro-action, both micro
                     self.micro_execute = self.micro_storage
                     self.micro_storage = []
@@ -233,7 +232,7 @@ class Policy(nn.Module):
             else:
                 # nt2 is a macro-action
                 self.leftmost.append(nt2)
-                if nt1 < self.vocab:
+                if nt1 < self.action_space:
                     # nt1 is a micro-action
                     self.micro_execute.append(nt1)
                 else:
@@ -243,24 +242,19 @@ class Policy(nn.Module):
         return log_prob, rule_prob
 
 
-model = Policy().to(device)
-
-optimizer = optim.Adam(model.parameters(), lr=lr)
-eps = np.finfo(np.float32).eps.item()
 
 
-def main(max_steps=max_steps, entropy_factor=entropy_factor):
-    max_steps = max_steps
-
-    running_reward = 0
-
-    # run inifinitely many episodes
-    tic = time.time()
-    highest_ep_reward = -1e6
-
+def main():
+    model = Policy().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    eps = np.finfo(np.float32).eps.item()
     writer = SummaryWriter()
 
-    for i_episode in range(1, 1001):  # count(1):
+    tic = time.time()
+    running_reward = 0
+    highest_ep_reward = -1e6   # record the highest episode reward in each log-interval
+
+    for i_episode in range(1, args.max_episodes + 1):  # count(1):
         micro_list = []
 
         # reset environment and episode reward
@@ -268,12 +262,11 @@ def main(max_steps=max_steps, entropy_factor=entropy_factor):
         state = np.array(state)
         state = torch.from_numpy(state).to(device).unsqueeze(1)
         ep_reward = 0
-        # for each episode, only run 9999 steps so that we don't
-        # infinite loop while learning
-        for t in range(1, max_steps):  # tqdm(range(1, max_steps)):
+
+        for t in range(1, args.max_steps + 1):    # tqdm(range(1, max_steps)):
             if t > 1:
-                # if not at the first timestep, we may not change the state
-                model.state_changed = True  #False
+                # if not at the first timestep, the state may not have changed from the previous step
+                model.state_changed = False
             # select action from policy
             log_prob, rule_prob = model(state)
 
@@ -299,19 +292,13 @@ def main(max_steps=max_steps, entropy_factor=entropy_factor):
                 reward = 0
                 done = None
 
-            if args.render:
-                env.render()
-
             model.rewards.append(reward)
             ep_reward += reward
 
             if done:
-                # print('episode %d success' % i_episode)
                 break
             elif len(model.leftmost) == 0:
-                # print('parse tree fully expanded, no more leftmost non-terminal')
                 break
-        # print(micro_list)
 
         # update cumulative reward
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
@@ -321,29 +308,36 @@ def main(max_steps=max_steps, entropy_factor=entropy_factor):
 
         # perform backprop
         R = 0
-        policy_losses = []  # list to save actor (policy) loss
+        policy_losses = []
         entropy_losses = []
-        returns = []  # list to save the true values
+        returns = []
 
-        # calculate the true value using rewards returned from the environment
+        # calculate returns at each timestep
         for r in model.rewards[::-1]:
-            # calculate the discounted value
             R = r + args.gamma * R
             returns.insert(0, R)
 
         returns = torch.tensor(returns, dtype=torch.float32)
         returns = (returns - returns.mean()) / (returns.std() + eps)
 
+        # calculate losses
         for log_prob, R, action_probs_hist in zip(model.action_probs, returns, model.action_probs_hist):
             entropy = torch.distributions.Categorical(probs=action_probs_hist).entropy()
             policy_losses.append(-log_prob * R)
             entropy_losses.append(- entropy_factor * entropy)
 
-        # sum up all the values of policy_losses and value_losses
+        # sum up all the losses
         episode_policy_loss = torch.stack(policy_losses).sum()
         episode_entropy_loss = torch.stack(entropy_losses).sum()
         episode_loss = episode_policy_loss + episode_entropy_loss
 
+        # reset gradients
+        optimizer.zero_grad()
+        # perform backprop+
+        episode_loss.backward(retain_graph=args.retain_graph)
+        optimizer.step()
+
+        # write to tensorboard
         writer.add_scalar('Episode reward', ep_reward, i_episode)
         writer.add_scalar('Steps per episode', t, i_episode)
 
@@ -360,13 +354,6 @@ def main(max_steps=max_steps, entropy_factor=entropy_factor):
             writer.add_scalar('Parse tree fully expanded', 1, i_episode)
         else:
             writer.add_scalar('Parse tree fully expanded', 0, i_episode)
-
-
-        # reset gradients
-        optimizer.zero_grad()
-        # perform backprop+
-        episode_loss.backward()
-        optimizer.step()
 
         # reset rewards and action buffer
         del model.rewards[:]
