@@ -11,11 +11,11 @@ import torch.optim as optim
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-max_steps = 300    # max steps the agent can execute per episode
-max_episodes = 1000  # max number of episodes
+max_steps = 200    # max steps the agent can execute per episode
+max_episodes = 3000  # max number of episodes
 entropy_factor = 0.05   # coefficient multiplying the entropy loss
-nt = 6    # number of non-terminals
-use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
+nt = 8    # number of non-terminals
+use_lstm = True   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
 lr = 1e-3
 gamma = 0.99   # discount factor
 log_interval = 10   # episode interval between training logs
@@ -101,9 +101,9 @@ class Policy(nn.Module):
         # action probs, micro/macro action, reward, hidden state buffer
         self.action_probs = []
         self.action_probs_hist = []
-        self.leftmost = [0]   # leftmost unexanded non-terminal
+        self.leftmost = [[0]]   # leftmost unexpanded non-terminal, append a list of non-terminal(s) for each expansion
+        self.micro_storage = [[]]  # rightmost terminal left unexecuted, append a list of terminal(s) for each expansion
         self.micro_execute = []  # micro action(s) to execute at this time step
-        self.micro_storage = []  # rightmost terminal left unexecuted
         self.rewards = []
         self.hidden_state = None
         self.state_changed = True   # stores whether state changed in the last timestep
@@ -142,14 +142,14 @@ class Policy(nn.Module):
 
         # change state to one hot vector
         state_one_hot = torch.FloatTensor(int(self.state_space/3), 3).zero_().to(device)
-        state_emb = state_one_hot.scatter_(1, state, 1).view(1, -1).squeeze(0)  # 1 x (3 x state_space)
+        state_emb = state_one_hot.scatter_(1, state, 1).view(1, -1)    # 1 x (3 x state_space)
 
         if self.use_lstm:
             if self.state_changed or (not self.allow_state_unchange):
                 # state has changed, or we do not allow to use the last state in the previous step, pass new state into LSTM
                 h, hidden_state = self.enc_lstm(state_emb.unsqueeze(0), self.hidden_state)
                 self.hidden_state = hidden_state   # hidden state buffer
-                params = self.enc_params(h.max(1)[0])
+                params = self.lstm_z(h.max(1)[0])
                 mean = params[:, :self.z_dim]
                 logvar = params[:, self.z_dim:]
 
@@ -166,7 +166,7 @@ class Policy(nn.Module):
             # use NN to encode z
             if self.state_changed or (not self.allow_state_unchange):
                 # state has changed, or we do not allow to use the last state in the previous step, pass new state into LSTM
-                self.z = F.relu(self.state_emb_z(state_emb.unsqueeze(0)))
+                self.z = F.relu(self.state_emb_z(state_emb))
                 z = self.z
             elif (not self.state_changed) and allow_state_unchange:
                 # state hasn't changed, and we allow to use the last state in previous step, use the same latent state vector z as before
@@ -174,11 +174,14 @@ class Policy(nn.Module):
 
 
         # pop the leftmost non-terminal
-        nt = self.leftmost.pop(-1)
-        assert nt == 0 or nt >= self.action_space
+        nt = self.leftmost[-1].pop(0)
 
+        assert nt == 0 or nt >= self.action_space   # assert nt is either the root or a non-terminal, not a terminal
+        assert len(self.leftmost) == len(self.micro_storage)   # append a list of micros/macros at each hierarchy even if there're none, so they should be of same length
+
+        # calculate rule probs
         if nt == 0:
-            # calculate rule probs
+            # the leftmost node is a root node
             root_rule_emb = self.root_rule_emb   # root_rule_num x rule_dim
             z = z.expand(self.root_rule_num, self.z_dim)
             root_rule_emb = torch.cat([root_rule_emb, z], 1)
@@ -193,11 +196,14 @@ class Policy(nn.Module):
             nt1 = int(rule//self.nt_states + self.action_space)
             nt2 = int(rule % self.nt_states + self.action_space)
 
-            self.leftmost = [nt1,nt2]
-            self.rightmost = []
-            self.mirco = []
+            self.leftmost.append([nt1,nt2])
+            self.micro_storage.append([])
+
+            del self.leftmost[0]
+            del self.micro_storage[0]
 
         else:
+            # the leftmost node is a non-terminal
             nt = nt - self.action_space
             z = z.expand(self.nt_nt_rule_num, self.z_dim)
             nt_rule_emb = self.nt_rule_emb   # nt_rule_num x rule_dim
@@ -219,26 +225,34 @@ class Policy(nn.Module):
             if nt2 < self.action_space:
                 # nt2 is a micro-action
                 if nt1 < self.action_space:
-                    # nt1 is a micro-action, both micro
-                    self.micro_execute = self.micro_storage
-                    self.micro_storage = []
-                    self.micro_execute.append(nt2)
-                    self.micro_execute.append(nt1)
+                    # nt1 is a micro-action, both are micro
+                    self.leftmost.append([])
+                    self.micro_storage.append([nt1,nt2])
+
+                    # since all terminals at this level, we can continue with execution, only execute till we reach a hierarchy with unexpanded leftmost nt
+                    for (store_list, leftmost_list) in zip(self.micro_storage[::-1], self.leftmost[::-1]):
+                        if len(leftmost_list) == 0:
+                            self.micro_execute.extend(store_list)
+                            del self.leftmost[-1]
+                            del self.micro_storage[-1]
+                        else:
+                            break
                 else:
                     # nt1 is a macro-action
-                    self.micro_storage.append(nt2)
-                    self.leftmost.append(nt1)
+                    self.leftmost.append([nt1])
+                    self.micro_storage.append([nt2])
 
             else:
                 # nt2 is a macro-action
-                self.leftmost.append(nt2)
                 if nt1 < self.action_space:
                     # nt1 is a micro-action
-                    self.micro_execute.append(nt1)
+                    self.leftmost.append([nt2])
+                    self.micro_storage.append([nt1])
                 else:
                     # nt1 is a macro-action
-                    self.leftmost.append(nt1)
-
+                    self.leftmost.append([nt1,nt2])
+                    self.micro_storage.append([])
+        # return log_prob for the chosen rule (for policy loss calculation), and return rule prob for all rules that can be chosen at this step (for entropy calculation)
         return log_prob, rule_prob
 
 
@@ -255,7 +269,7 @@ def main():
     highest_ep_reward = -1e6   # record the highest episode reward in each log-interval
 
     for i_episode in range(1, args.max_episodes + 1):  # count(1):
-        micro_list = []
+        micro_list = []   # store the list of action sequence for each episode, in case we need to check
 
         # reset environment and episode reward
         state = env.reset()
@@ -267,16 +281,16 @@ def main():
             if t > 1:
                 # if not at the first timestep, the state may not have changed from the previous step
                 model.state_changed = False
+
             # select action from policy
             log_prob, rule_prob = model(state)
-
             model.action_probs.append(log_prob)
             model.action_probs_hist.append(rule_prob)
 
             reward = 0
             if len(model.micro_execute) > 0:
                 for _ in range(len(model.micro_execute)):
-                    action = model.micro_execute.pop(-1)
+                    action = model.micro_execute.pop(0)
                     micro_list.append(action)
                     tmp_state, step_reward, done, _ = env.step(action)
                     reward += step_reward
@@ -297,7 +311,7 @@ def main():
 
             if done:
                 break
-            elif len(model.leftmost) == 0:
+            elif len(model.leftmost) == 0:   # if no more unexpanded leftmost non-terminals (the parse tree has fully expanded)
                 break
 
         # update cumulative reward
@@ -358,9 +372,9 @@ def main():
         # reset rewards and action buffer
         del model.rewards[:]
         del model.action_probs[:]
-        model.leftmost = [0]
+        model.leftmost = [[0]]
         model.micro_execute = []
-        model.micro_storage = []
+        model.micro_storage = [[]]
         model.hidden_state = None
         del model.action_probs_hist[:]
 
