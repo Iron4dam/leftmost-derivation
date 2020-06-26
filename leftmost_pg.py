@@ -142,7 +142,7 @@ class Policy(nn.Module):
 
         # change state to one hot vector
         state_one_hot = torch.FloatTensor(int(self.state_space/3), 3).zero_().to(device)
-        state_emb = state_one_hot.scatter_(1, state, 1).view(1, -1)    # 1 x (3 x state_space)
+        state_emb = state_one_hot.scatter(1, state, 1).view(1, -1)    # 1 x (3 x state_space)
 
         if self.use_lstm:
             if self.state_changed or (not self.allow_state_unchange):
@@ -156,8 +156,8 @@ class Policy(nn.Module):
                 if use_mean:
                     z = mean
                 else:
-                    z = mean.new(1, self.z_dim).normal_(0, 1)   # mean.size(1)
-                    z = (0.5 * logvar).exp() * z + mean
+                    eps = mean.new(1, self.z_dim).normal(0, 1)   # mean.size(1)
+                    z = (0.5 * logvar).exp() * eps + mean
                 self.z = z
             elif (not self.state_changed) and allow_state_unchange:
                 # state hasn't changed, and we allow to use the last state in previous step, use the same latent state vector z as before
