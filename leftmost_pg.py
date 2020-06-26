@@ -12,7 +12,7 @@ from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 max_steps = 200    # max steps the agent can execute per episode
-max_episodes = 3000  # max number of episodes
+max_episodes = 100  # max number of episodes
 entropy_factor = 0.05   # coefficient multiplying the entropy loss
 nt = 8    # number of non-terminals
 use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
