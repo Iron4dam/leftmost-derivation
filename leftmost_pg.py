@@ -33,7 +33,7 @@ env.set_env_parameters(num_disks, env_noise, verbose=True)
 # env.seed(args.seed)
 # torch.manual_seed(args.seed)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+device = torch.device("cpu")
 
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
@@ -75,10 +75,6 @@ class ResidualLayer(nn.Module):
         return F.relu(self.lin2(F.relu(self.lin1(x)))) + x
 
 class Policy(nn.Module):
-    """
-    implements both actor and critic in one model
-    """
-
     def __init__(self, action_space=args.action_space_dim,
                  state_space=args.state_space_dim*3,   # use one hot encoding for states
                  nt_states=nt,
@@ -156,7 +152,7 @@ class Policy(nn.Module):
                 if use_mean:
                     z = mean
                 else:
-                    eps = mean.new(1, self.z_dim).normal(0, 1)   # mean.size(1)
+                    eps = mean.new(1, self.z_dim).normal(0, 1)
                     z = (0.5 * logvar).exp() * eps + mean
                 self.z = z
             elif (not self.state_changed) and allow_state_unchange:
