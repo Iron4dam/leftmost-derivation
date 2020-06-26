@@ -15,11 +15,11 @@ max_steps = 200    # max steps the agent can execute per episode
 max_episodes = 3000  # max number of episodes
 entropy_factor = 0.05   # coefficient multiplying the entropy loss
 nt = 8    # number of non-terminals
-use_lstm = True   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
+use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
 lr = 1e-3
 gamma = 0.99   # discount factor
 log_interval = 10   # episode interval between training logs
-allow_state_unchange = False   # if True, we do not pass in the same state into LSTM/encoder if state unchanged
+allow_state_unchange = True   # if True, we do not pass in the same state into LSTM/encoder if state unchanged
 retain_graph = True if allow_state_unchange else False
 
 
@@ -84,7 +84,7 @@ class Policy(nn.Module):
                  nt_states=nt,
                  lstm_dim=32,   # dimension of lstm hidden states
                  rule_dim=32,  # dimension of rule embeddings
-                 z_dim=32,   # dimension of the latent state encoding vector (either given by LSTM or a simple NN encoder)
+                 z_dim=16,   # dimension of the latent state encoding vector (either given by LSTM or a simple NN encoder)
                  use_lstm = args.use_lstm,
                  allow_state_unchange = args.allow_state_unchange):
         super(Policy, self).__init__()
@@ -345,6 +345,7 @@ def main():
         episode_entropy_loss = torch.stack(entropy_losses).sum()
         episode_loss = episode_policy_loss + episode_entropy_loss
 
+        # with torch.autograd.set_detect_anomaly(True):
         # reset gradients
         optimizer.zero_grad()
         # perform backprop+
