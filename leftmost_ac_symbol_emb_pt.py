@@ -108,7 +108,6 @@ class Policy(nn.Module):
         self.action_probs_hist = []
         self.values = []
         self.leftmost = [[0]]   # leftmost unexpanded non-terminal, append a list of non-terminal(s) for each expansion
-        self.micro_storage = [[]]  # rightmost terminal left unexecuted, append a list of terminal(s) for each expansion
         self.micro_execute = []  # micro action(s) to execute at this time step
         self.rewards = []
         self.hidden_state = None
@@ -197,17 +196,17 @@ class Policy(nn.Module):
 
 
         # pop the leftmost non-terminal
+
         nt = self.leftmost[-1].pop(0)
+        if len(self.leftmost[-1]) == 0:
+            del self.leftmost[-1]
         assert nt == 0 or nt >= self.action_space   # assert nt is either the root or nt/pt, not a terminal
-        assert len(self.leftmost) == len(self.micro_storage)   # append a list of micros/macros at each hierarchy even if there're none, so they should be of same length
+        # assert len(self.leftmost) == len(self.micro_storage)   # append a list of micros/macros at each hierarchy even if there're none, so they should be of same length
 
         # calculate rule probs
         if nt == 0:
-            del self.leftmost[-1]
-            del self.micro_storage[-1]
 
             self.leftmost.append([0])
-            self.micro_storage.append([])
 
             # the leftmost node is a root node
             root_emb = self.root_emb   # 1 x symbol_dim
@@ -225,7 +224,6 @@ class Policy(nn.Module):
             nt2 = int((rule%self.nt_states) + self.action_space)
 
             self.leftmost.append([nt1,nt2])
-            self.micro_storage.append([])
 
             # calculate action/rule-value
             values = self.root_values(root_emb)
@@ -255,7 +253,6 @@ class Policy(nn.Module):
                 nt2 = int(rule%(self.pt_states + self.nt_states) + self.action_space)
 
                 self.leftmost.append([nt1,nt2])
-                self.micro_storage.append([])
 
                 # calculate action/rule-value
                 values = self.nt_values(nt_emb)
@@ -281,16 +278,7 @@ class Policy(nn.Module):
 
                 a = int(rule)
 
-                self.leftmost.append([])
-                self.micro_storage.append([a])
-
-                for (store_list, leftmost_list) in zip(self.micro_storage[::-1], self.leftmost[::-1]):
-                        if len(leftmost_list) == 0:
-                            self.micro_execute.extend(store_list)
-                            del self.leftmost[-1]
-                            del self.micro_storage[-1]
-                        else:
-                            break
+                self.micro_execute.append(a)
 
         # return log_prob for the chosen rule (for policy loss calculation), and return rule prob for all rules that can be chosen at this step (for entropy calculation)
         return log_prob, rule_prob, value
@@ -348,25 +336,23 @@ def main():
 
             reward = 0
             if len(model.micro_execute) > 0:
-                for _ in range(len(model.micro_execute)):
-                    action = model.micro_execute.pop(0)
-                    micro_list.append(action)
-                    tmp_state, step_reward, done, _ = env.step(action)
-                    if step_reward == -1:
-                        step_reward = -0.01
-                    if step_reward == 0:
-                        step_reward = 0.01
-                    if step_reward == 100:
-                        step_reward = 5
-                    reward += step_reward
-                    if step_reward:  # > -1:
-                        # only change the state when make a legal move
-                        model.state_changed = True
-                        state = tmp_state
-                        state = np.array(state)
-                        state = torch.from_numpy(state).to(device).unsqueeze(1)
-                    if done:
-                        break
+                # for _ in range(len(model.micro_execute)):
+                action = model.micro_execute.pop(0)
+                micro_list.append(action)
+                tmp_state, step_reward, done, _ = env.step(action)
+                if step_reward == -1:
+                    step_reward = -0.01
+                if step_reward == 0:
+                    step_reward = 0.01
+                if step_reward == 100:
+                    step_reward = 5
+                reward += step_reward
+                if step_reward:  # > -1:
+                    # only change the state when make a legal move
+                    model.state_changed = True
+                    state = tmp_state
+                    state = np.array(state)
+                    state = torch.from_numpy(state).to(device).unsqueeze(1)
             else:
                 reward = 0
                 done = None
@@ -385,7 +371,6 @@ def main():
                 break
             # elif t == args.max_steps:
             #     ep_reward -= 2
-
         # update cumulative reward
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
 

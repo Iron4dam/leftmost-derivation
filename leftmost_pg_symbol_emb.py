@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 max_steps = 500    # max steps the agent can execute per episode
 max_episodes = 20000  # max number of episodes
-entropy_factor = 0.1   # coefficient multiplying the entropy loss
+entropy_factor = 0.01   # coefficient multiplying the entropy loss
 nt = 6    # number of non-terminals
 use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
 lr = 1e-3
@@ -289,12 +289,12 @@ def main():
                     action = model.micro_execute.pop(0)
                     micro_list.append(action)
                     tmp_state, step_reward, done, _ = env.step(action)
-                    # if step_reward == -1:
-                    #     step_reward = 0
+                    if step_reward == -1:
+                        step_reward = -0.01
                     if step_reward == 0:
-                        step_reward = 1
+                        step_reward = 0.01
                     if step_reward == 100:
-                        step_reward = 500
+                        step_reward = 5
                     reward += step_reward
                     if step_reward:  # > -1:
                         # only change the state when make a legal move
@@ -317,8 +317,8 @@ def main():
                     # ep_reward += 50
                 break
             elif len(model.leftmost) == 0:   # if no more unexpanded leftmost non-terminals (the parse tree has fully expanded), but not success
-                model.rewards[-1] -= 50
-                ep_reward -= 50
+                # model.rewards[-1] -= 50
+                # ep_reward -= 50
                 break
             # elif t == args.max_steps:
             #     ep_reward -= 500

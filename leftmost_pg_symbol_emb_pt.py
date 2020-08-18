@@ -14,8 +14,8 @@ from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 max_steps = 500    # max steps the agent can execute per episode
-max_episodes = 20000  # max number of episodes
-entropy_factor = 0.001  # coefficient multiplying the entropy loss
+max_episodes = 30000  # max number of episodes
+entropy_factor = 0.01  # coefficient multiplying the entropy loss
 nt = 6    # number of non-terminals
 pt = 6   # number of pre-terminals
 use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
@@ -66,7 +66,7 @@ parser.add_argument('--use-lstm', type=bool, default=use_lstm, metavar='N',
                     help='use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep (default: True)')
 parser.add_argument('--nt-states', type=int, default=nt, metavar='N',
                     help='number of non-terminals (default: 6)')
-parser.add_argument('--pt-states', type=int, default=nt, metavar='N',
+parser.add_argument('--pt-states', type=int, default=pt, metavar='N',
                     help='number of pre-terminals (default: 6)')
 args = parser.parse_args()
 
@@ -305,9 +305,9 @@ def main():
                     micro_list.append(action)
                     tmp_state, step_reward, done, _ = env.step(action)
                     if step_reward == -1:
-                        step_reward = -0.001
+                        step_reward = -0.01
                     if step_reward == 0:
-                        step_reward = 0.001
+                        step_reward = 0.01
                     if step_reward == 100:
                         step_reward = 5
                     reward += step_reward
@@ -335,8 +335,8 @@ def main():
                 # model.rewards[-1] -= 50
                 # ep_reward -= 50
                 break
-            elif t == args.max_steps:
-                ep_reward -= 2
+            # elif t == args.max_steps:
+            #     ep_reward -= 2
 
         # update cumulative reward
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
@@ -348,7 +348,7 @@ def main():
 
         if success_count > 200:
             # agent solved the game
-            torch.save(model.state_dict(), '/saved_models/%f_entropy_%d_nt_%d_pt_%s_lstm' %(args.entropy_factor, args.nt_states, args.pt_states, args.use_lstm))
+            torch.save(model.state_dict(), '/saved_models/%.3f_entropy_%d_nt_%d_pt_%s_lstm.pt' %(args.entropy_factor, args.nt_states, args.pt_states, args.use_lstm))
             print('Agent solved the game!')
             break
 
