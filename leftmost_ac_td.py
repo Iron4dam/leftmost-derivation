@@ -13,10 +13,10 @@ import torch.optim as optim
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-max_steps = 500    # max steps the agent can execute per episode
+max_steps = 1000    # max steps the agent can execute per episode
 max_episodes = 15000  # max number of episodes
 entropy_factor = 0.01  # coefficient multiplying the entropy loss
-nt = 6    # number of non-terminals
+nt = 12    # number of non-terminals
 pt = 6   # number of pre-terminals
 use_lstm = False   # use LSTM to encode state sequentially or use a simple neural network encoder to encode state at each timestep
 lr = 1e-3
@@ -24,6 +24,11 @@ gamma = 0.99   # discount factor
 log_interval = 10   # episode interval between training logs
 allow_state_unchange = False   # if True, we do not pass in the same state into LSTM/encoder if state unchanged
 retain_graph = True if allow_state_unchange else False
+
+decay = False
+rule_reward = -0.0
+positive_reward = 0.01
+negative_reward = -0.01
 
 
 # gym-hanoi env settings
@@ -40,6 +45,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
+
+parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
+
+parser.add_argument('--decay', type=bool, default=decay)
+parser.add_argument('--rule-reward', type=float, default=rule_reward)
+parser.add_argument('--positive-reward', type=float, default=positive_reward)
+parser.add_argument('--negative-reward', type=float, default=negative_reward)
+
 parser.add_argument('--gamma', type=float, default=gamma, metavar='G',
                     help='discount factor (default: 0.99)')
 parser.add_argument('--seed', type=int, default=543, metavar='N',
@@ -285,7 +298,9 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     optimizer_critic = optim.Adam(critic.parameters(), lr=args.lr)
     eps = np.finfo(np.float32).eps.item()
-    writer = SummaryWriter()
+    writer = SummaryWriter(log_dir='/home/xy2419/leftmost-derivation/runs/td_%.3f_entropy_%d_nt_%d_pt_%s_decay_%.3f_%.3f_%.3f_reward_%d_disks_%d/' 
+        %(args.entropy_factor, args.nt_states, args.pt_states, args.decay, args.rule_reward, args.positive_reward, args.negative_reward, args.state_space_dim, args.max_steps))
+
 
     tic = time.time()
     running_reward = 0
@@ -322,16 +337,16 @@ def main():
             model.action_probs.append(log_prob)
             model.action_probs_hist.append(rule_prob)
 
-            reward = 0
+            reward = args.rule_reward
             if len(model.micro_execute) > 0:
                 # for _ in range(len(model.micro_execute)):
                 action = model.micro_execute.pop(0)
                 micro_list.append(action)
                 tmp_state, step_reward, done, _ = env.step(action)
                 if step_reward == -1:
-                    step_reward = -0.01
+                    step_reward = args.negative_reward
                 if step_reward == 0:
-                    step_reward = 0.01
+                    step_reward = args.positive_reward
                 if step_reward == 100:
                     step_reward = 5 * 2
                 reward += step_reward
@@ -379,17 +394,9 @@ def main():
         else:
             success_count = 0
 
-        if success_count > 200:
-            # agent solved the game
-            torch.save(model.state_dict(), '/home/adamxinyuyang/Documents/leftmost-derivation/saved_models/%.3f_entropy_%d_nt_%d_pt_%s_lstm.pt' %(args.entropy_factor, args.nt_states, args.pt_states, args.use_lstm))
-            print('Agent solved the game!')
-            break
 
         if ep_reward >= highest_ep_reward:
             highest_ep_reward = ep_reward
-
-        if ep_reward == 0:
-            print(micro_list)
 
       
         # write to tensorboard
@@ -397,19 +404,24 @@ def main():
         writer.add_scalar('Steps per episode', t, i_episode)
 
         writer.add_scalar('Policy loss', np.mean(episode_actor_loss), i_episode)
-        writer.add_scalar('Entroy loss', np.mean(episode_entropy_loss), i_episode)
+        writer.add_scalar('Entropy loss', np.mean(episode_entropy_loss), i_episode)
         writer.add_scalar('Critic loss', np.mean(episode_critic_loss), i_episode)
+
+        writer.add_scalar('Length of terminal sequence', len(micro_list), i_episode)
 
         if done:
             writer.add_scalar('Episode success', 1, i_episode)
         else:
             writer.add_scalar('Episode success', 0, i_episode)
 
-        if len(model.leftmost) == 0:
-            # parse tree fully expanded
-            writer.add_scalar('Parse tree fully expanded', 1, i_episode)
-        else:
-            writer.add_scalar('Parse tree fully expanded', 0, i_episode)
+        if success_count > 200:
+            # agent solved the game
+            torch.save(model.state_dict(), '/home/xy2419/leftmost-derivation/saved_models/td_%.3f_entropy_%d_nt_%d_pt_%s_decay_%.3f_%.3f_%.3f_reward_%d_disks_%d.pt' 
+            %(args.entropy_factor, args.nt_states, args.pt_states, args.decay, args.rule_reward, args.positiive_reward, args.negative_reward, args.state_space_dim, args.max_steps))
+            print('Agent solved the game!')
+            break
+
+
 
         # reset rewards and action buffer
         del model.rewards[:]
