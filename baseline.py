@@ -13,17 +13,17 @@ import torch.optim as optim
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-max_steps = 1000    # max steps the agent can execute per episode
-max_episodes = 20000  # max number of episodes
+max_steps = 1500    # max steps the agent can execute per episode
+max_episodes = 5e4  # max number of episodes
 lr = 1e-3
 gamma = 0.99   # discount factor
-log_interval = 10   # episode interval between training logs
+log_interval = 100   # episode interval between training logs
 
-decay_in = 1e4
+decay_in = 3e4
 seed = 2
 
 # gym-hanoi env settings
-num_disks = 3
+num_disks = 4
 env_noise = 0.   # transition/action failure probability
 state_space_dim = num_disks
 action_space_dim = 6   # always 6 actions for 3 poles
@@ -37,8 +37,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 entropy_factor = 0.1  # decay to 0.01
 decay = True
 
-positive_reward = 0.01
-negative_reward = -0.01
+positive_reward = 0.001
+negative_reward = -0.001
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
 
@@ -133,6 +133,7 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic=True
 
     model = Policy().to(device)
     # if args.load:
@@ -142,7 +143,7 @@ def main():
     model_name = 'baseline_%.3f_entropy_%s_decay_%.3f_%.3f_reward_%d_disks_%d_steps_%d_seed'\
         %(args.entropy_factor, args.decay, args.positive_reward, args.negative_reward, args.state_space_dim, args.max_steps, args.seed)
     
-    writer = SummaryWriter(log_dir='/home/xy2419/leftmost-derivation/runs/'+model_name+'/')
+    writer = SummaryWriter(log_dir='/home/adamxinyuyang/Documents/leftmost-derivation/runs/'+model_name+'/')
 
     tic = time.time()
     running_reward = 0
@@ -153,8 +154,9 @@ def main():
     min_step = 1e5
     for i_episode in range(1, int(args.max_episodes) + 1):  # count(1):
         if args.decay:
-            entropy_factor = linear_anneal(counter=i_episode, start=args.entropy_factor, final=0.01, in_steps=args.decay_in)
-
+            entropy_factor = linear_anneal(counter=i_episode, start=args.entropy_factor, final=0.00, in_steps=args.decay_in)
+            # lr = linear_anneal(counter=i_episode, start=args.lr, final=1e-4, in_steps=args.decay_in)
+            # optimizer = optim.Adam(model.parameters(), lr=lr)
         micro_list = []   # store the list of action sequence for each episode, in case we need to check
         micro_str = ''
 
@@ -279,8 +281,8 @@ def main():
         if i_episode % args.log_interval == 0:
             toc = time.time()
             print(
-                'Episode {} \t Last reward: {:.2f} \t Average reward: {:.2f} \t Highest reward: {:.2f} \t Time taken: {:.2f}s'.format(
-                    i_episode, ep_reward, running_reward, highest_ep_reward, toc - tic))
+                'Episode {} \t \t Average reward: {:.2f} \t Time taken: {:.2f}s'.format(
+                    i_episode, running_reward, toc - tic))
             #             print(kl.mean())
             tic = toc
             highest_ep_reward = -1e6

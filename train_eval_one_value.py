@@ -12,23 +12,25 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
+import os
 
-max_steps = 2500    # max steps the agent can execute per episode
-max_episodes = 4e4  # max number of episodes
+max_steps = 1000    # max steps the agent can execute per episode
+max_episodes = 3e4  # max number of episodes
 decay_in = 2e4
-nt = 8   # number of non-terminals
+decay_to = 0.0
+nt = 6   # number of non-terminals
 pt = 6   # number of pre-terminals
 lr = 1e-3
 gamma = 0.99   # discount factor
-log_interval = 10   # episode interval between training logs
+log_interval = 100   # episode interval between training logs
 value_one = False
 load = False
-load_path = '/home/xy2419/leftmost-derivation/saved_models/relu_False_value_0.100_entropy_6_nt_6_pt_True_decay_-0.000_0.010_-0.010_reward_3_disks_1000_steps.pt'
+load_path = '/home/adamxinyuyang/Documents/leftmost-derivation/saved_models/relu_False_value_0.100_entropy_6_nt_6_pt_True_decay_-0.000_0.010_-0.010_reward_3_disks_1000_steps.pt'
 
-seed = 0
+seed = 2
 
 # gym-hanoi env settings
-num_disks = 4
+num_disks = 3
 env_noise = 0.   # transition/action failure probability
 state_space_dim = num_disks
 action_space_dim = 6   # always 6 actions for 3 poles
@@ -37,19 +39,21 @@ env.set_env_parameters(num_disks, env_noise, verbose=True)
 env.seed(seed)
 # torch.manual_seed(args.seed)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.cuda.set_device(0)
 # device = torch.device("cpu")
 
 entropy_factor = 0.1  # coefficient multiplying the entropy loss
 decay = True
 
-rule_reward = -0.01
-positive_reward = 0.0
-negative_reward = -0.01
+rule_reward = -0.0
+positive_reward = 0.001
+negative_reward = -0.001
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
 
 parser.add_argument('--decay', type=bool, default=decay)
 parser.add_argument('--decay_in', type=int, default=decay_in)
+parser.add_argument('--decay_to', type=float, default=decay_to)
 parser.add_argument('--rule-reward', type=float, default=rule_reward)
 parser.add_argument('--positive-reward', type=float, default=positive_reward)
 parser.add_argument('--negative-reward', type=float, default=negative_reward)
@@ -59,7 +63,7 @@ parser.add_argument('--load_path', type=str, default=load_path)
 
 parser.add_argument('--gamma', type=float, default=gamma, metavar='G',
                     help='discount factor (default: 0.99)')
-parser.add_argument('--seed', type=int, default=0, metavar='N',
+parser.add_argument('--seed', type=int, default=seed, metavar='N',
                     help='random seed (default: 543)')
 parser.add_argument('--log-interval', type=int, default=log_interval, metavar='N',
                     help='interval between training status logs (default: 10)')
@@ -166,18 +170,18 @@ class Policy(nn.Module):
 
         # value networks
         if value_one:
-            self.values_all = nn.Sequential(nn.Linear(self.z_dim, self.z_dim),
+            self.values_all = nn.Sequential(nn.Linear(symbol_dim + self.z_dim, self.z_dim),
                                       nn.ReLU(),
                                       nn.Linear(self.z_dim, 1))
 
         else:
-            self.root_values = nn.Sequential(nn.Linear(self.z_dim, self.z_dim),
+            self.root_values = nn.Sequential(nn.Linear(symbol_dim + self.z_dim, self.z_dim),
                                         nn.ReLU(),
                                         nn.Linear(self.z_dim, 1))
-            self.nt_values = nn.Sequential(nn.Linear(self.z_dim, self.z_dim),
+            self.nt_values = nn.Sequential(nn.Linear(symbol_dim + self.z_dim, self.z_dim),
                                         nn.ReLU(),
                                         nn.Linear(self.z_dim, 1))
-            self.pt_values = nn.Sequential(nn.Linear(self.z_dim, self.z_dim),
+            self.pt_values = nn.Sequential(nn.Linear(symbol_dim + self.z_dim, self.z_dim),
                                         nn.ReLU(),
                                         nn.Linear(self.z_dim, 1))
 
@@ -247,10 +251,10 @@ class Policy(nn.Module):
 
             # calculate action/rule-value
             if self.value_one:
-                values = self.values_all(self.z)
+                values = self.values_all(root_emb)
                 value = values[:]
             else:
-                values = self.root_values(self.z)
+                values = self.root_values(root_emb)  #self.z)
                 value = values[:]
 
 
@@ -312,10 +316,10 @@ class Policy(nn.Module):
 
                 # calculate action/rule-value
                 if self.value_one:
-                    values = self.values_all(self.z)
+                    values = self.values_all(nt_emb)
                     value = values[:]
                 else:
-                    values = self.nt_values(self.z)
+                    values = self.nt_values(nt_emb)   #self.z)
                     value = values[:]
 
             else:   # nt is a pt
@@ -337,10 +341,10 @@ class Policy(nn.Module):
 
                 # calculate action/rule-value
                 if self.value_one:
-                    values = self.values_all(self.z)
+                    values = self.values_all(pt_emb)
                     value = values[:]
                 else:
-                    values = self.nt_values(self.z)
+                    values = self.pt_values(pt_emb)   #self.z)
                     value = values[:]
 
                 a = int(rule)
@@ -373,28 +377,44 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic=True
 
     model = Policy().to(device)
-    if args.load:
-        model.load_state_dict(torch.load(args.load_path))
+    # if args.load:
+    #     model.load_state_dict(torch.load(args.load_path))
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     eps = np.finfo(np.float32).eps.item()
-    model_name = 'NN_%s_value_new_%.3f_entropy_%d_nt_%d_pt_%s_decay_%.3f_%.3f_%.3f_reward_%d_disks_%d_steps_%s_load_%d_seed'\
-        %(args.value_one, args.entropy_factor, args.nt_states, args.pt_states, args.decay, args.rule_reward, args.positive_reward, args.negative_reward, args.state_space_dim, args.max_steps, args.load, args.seed)
+    model_folder_name = 'NN_%d_disks_%d_nt_%d_pt_%.3f_%.3f_%.3f_reward_%d_steps_%s_load_%d_seed_%.2f_decay/'\
+        %(args.state_space_dim, args.nt_states, args.pt_states, args.rule_reward, args.positive_reward, args.negative_reward, args.max_steps, args.load, args.seed, args.decay_to)
     
-    writer = SummaryWriter(log_dir='/home/xy2419/leftmost-derivation/runs/'+model_name+'/')
+    directory1 = '/home/adamxinyuyang/Documents/leftmost-derivation/saved_models/'+model_folder_name
+    if not os.path.exists(directory1):
+        os.makedirs(directory1)
+    
+    directory2 = '/home/adamxinyuyang/Documents/leftmost-derivation/plot_dot/'+model_folder_name
+    if not os.path.exists(directory2):
+        os.makedirs(directory2)
+
+    directory3 = '/home/adamxinyuyang/Documents/leftmost-derivation/plot/'+model_folder_name
+    if not os.path.exists(directory3 + 'pdf/'):
+        os.makedirs(directory3 + 'pdf/')
+    if not os.path.exists(directory3 + 'png/'):
+        os.makedirs(directory3 + 'png/')
+
+    writer = SummaryWriter(log_dir='/home/adamxinyuyang/Documents/leftmost-derivation/runs/'+model_folder_name)
 
 
     tic = time.time()
     running_reward = 0
     highest_ep_reward = -1e6   # record the highest episode reward in each log-interval
 
-    success_count = 0
     entropy_factor = args.entropy_factor
-    min_step = 1e5
+    lr = args.lr
     for i_episode in range(1, int(args.max_episodes) + 1):  # count(1):
         if args.decay:
-            entropy_factor = linear_anneal(counter=i_episode, start=args.entropy_factor, final=0.01, in_steps=args.decay_in)
+            entropy_factor = linear_anneal(counter=i_episode, start=args.entropy_factor, final=args.decay_to, in_steps=args.decay_in)
+            # lr = linear_anneal(counter=i_episode, start=args.lr, final=1e-4, in_steps=args.decay_in)
+            # optimizer = optim.Adam(model.parameters(), lr=lr)
 
         micro_list = []   # store the list of action sequence for each episode, in case we need to check
         micro_str = ''
@@ -424,19 +444,17 @@ def main():
                     step_reward = args.negative_reward
                     micro_str = micro_str[:-1]
                     micro_str += action_string.upper()
-                if step_reward == 0:
+                elif step_reward == 0:
                     step_reward = args.positive_reward
-                if step_reward == 100:
+                elif step_reward == 100:
                     step_reward = 5
                 reward += step_reward
-                if step_reward:  # > -1:
-                    # only change the state when make a legal move
-                    model.state_changed = True
-                    state = tmp_state
-                    state = np.array(state)
-                    state = torch.from_numpy(state).to(device).unsqueeze(1)
+
+                state = tmp_state
+                state = np.array(state)
+                state = torch.from_numpy(state).to(device).unsqueeze(1)
             else:
-                reward = 0
+                reward = args.rule_reward
                 done = None
 
             model.rewards.append(reward)
@@ -460,8 +478,6 @@ def main():
         if ep_reward >= highest_ep_reward:
             highest_ep_reward = ep_reward
 
-        if ep_reward == 0:
-            print(micro_list)
 
         # perform backprop
         R = 0
@@ -519,8 +535,6 @@ def main():
         # writer.add_scalar('9 Max node count', max_node_count, i_episode)
 
 
-
-
         # reset rewards and action buffer
         del model.rewards[:]
         del model.action_probs[:]
@@ -537,57 +551,33 @@ def main():
         if i_episode % args.log_interval == 0:
             toc = time.time()
             print(
-                'Episode {} \t Last reward: {:.2f} \t Average reward: {:.2f} \t Highest reward: {:.2f} \t Time taken: {:.2f}s'.format(
-                    i_episode, ep_reward, running_reward, highest_ep_reward, toc - tic))
+                'Episode {}  Average reward {:.2f} Time {:.2f}s  Len {} Step {}'.format(
+                    i_episode, running_reward, toc - tic, len(micro_list), t))
             #             print(kl.mean())
             tic = toc
             highest_ep_reward = -1e6
 
-        # # check if we have "solved" the cart pole problem
-        # if running_reward >= 90:
-        #     print("Solved! Running reward is now {} and "
-        #           "the last episode runs to {} time steps!".format(running_reward, t))
-        #     break
 
+            # torch.save(model.state_dict(), '/home/adamxinyuyang/Documents/leftmost-derivation/saved_models/' + model_folder_name + str(i_episode) + '.pt')
 
-        if done:
-            success_count += 1
-        else:
-            success_count = 0
+            fname =  '/home/adamxinyuyang/Documents/leftmost-derivation/plot_dot/' + model_folder_name + str(i_episode) + '.dot'
+            pdf_path = '/home/adamxinyuyang/Documents/leftmost-derivation/plot/' + model_folder_name + 'pdf/' + str(i_episode) + '.pdf'
+            png_path = '/home/adamxinyuyang/Documents/leftmost-derivation/plot/' + model_folder_name + 'png/' + str(i_episode) + '.png'
+            with open(fname, "w") as text_file:
+                text_file.write('graph')
+                text_file.write('\n')
+                text_file.write('{')
+                text_file.write(model.graph)
+                # text_file.write('\n')
+                # text_file.write('label="episode %d, step taken %d, micro length %d, %s"' %(i_episode,t,len(micro_list), micro_str))
+                # text_file.write('\n')
+                text_file.write('}')
 
-
-        if t < min_step:
-            torch.save(model.state_dict(), '/home/xy2419/leftmost-derivation/saved_models/' + model_name + '.pt')
-            min_step = t
-            print('episode %d, step taken %d, micro length %d' %(i_episode,t,len(micro_list)))
-
-            if i_episode < 10:
-                with open('/home/xy2419/leftmost-derivation/plot/' + model_name + '.txt', "w") as text_file:
-                    text_file.write('graph')
-                    text_file.write('\n')
-                    text_file.write('{')
-                    text_file.write(model.graph)
-                    text_file.write('\n')
-                    text_file.write('}')
-                    text_file.write('\n')
-                    text_file.write(micro_str)
-                    text_file.write('\n')
-                    text_file.write('episode %d, step taken %d, micro length %d' %(i_episode,t,len(micro_list)))
-                    text_file.write('\n\n')
-            else:
-                with open('/home/xy2419/leftmost-derivation/plot/' + model_name + '.txt', "a") as text_file:
-                    text_file.write('graph')
-                    text_file.write('\n')
-                    text_file.write('{')
-                    text_file.write(model.graph)
-                    text_file.write('\n')
-                    text_file.write('}')
-                    text_file.write('\n')
-                    text_file.write(micro_str)
-                    text_file.write('\n')
-                    text_file.write('episode %d, step taken %d, micro length %d' %(i_episode,t,len(micro_list)))
-                    text_file.write('\n\n')
-
+            command_pdf = 'dot -Tpdf ' + fname + ' -o ' + pdf_path
+            command_png = 'dot -Tpng ' + fname + ' -o ' + png_path
+            os.system(command_pdf)
+            os.system(command_png)
+            
         model.action_hist = []
         model.graph = ''
         model.graph_count = 1
